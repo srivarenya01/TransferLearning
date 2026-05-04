@@ -1,0 +1,19 @@
+# Byte-compiled / optimized / DLL files
+__pycache__
+
+# Virtual environments
+venv/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project specific
+*.zip
+
+# Data
+Data
+Cleaned_Data
+WriteUp
