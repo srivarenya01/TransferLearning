@@ -34,6 +34,7 @@ The project follows a linear sequence of operations to ensure data integrity and
   - **Hybrid Modeling**: Support for Deep Neural Networks (DNN) and XGBoost.
   - **Transfer Logic**: Implements "Hot Start" configurations where weights from a source crop (Soybeans) are transferred and fine-tuned for the target crop (Rice).
   - **Optimization**: Integrated with **Optuna** for automated Bayesian hyperparameter search.
+  - **LOYO Validation**: Runs leave-one-year-out validation after the random split benchmark to test each target-crop year against models trained on the remaining years.
   - **Statistics**: Generates error metrics (NRMSE/RMSE) and p-values for model comparison.
 
 ---

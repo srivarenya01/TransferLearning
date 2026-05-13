@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 from matplotlib import pyplot as plt
 import os
 import numpy as np
@@ -35,6 +35,17 @@ TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 # Global Constants
 NUM_ITERATIONS = 100
 NUM_WORKERS = os.cpu_count()
+YEAR_COLUMN_CANDIDATES = ("Year", "year", "Harvest_Year", "HarvestYear", "Crop_Year", "CropYear")
+DATE_COLUMN_CANDIDATES = (
+    "Harvesting_Date",
+    "Harvesting_DT",
+    "Planting_Date",
+    "Planting_DT",
+    "Emergence_Date",
+    "Emergence_DT",
+)
+MIN_LOYO_TRAIN_ROWS = 5
+MIN_LOYO_TEST_ROWS = 1
 
 def folder_creation() -> None :
     """
@@ -43,22 +54,67 @@ def folder_creation() -> None :
     for folder in ["Cleaned_Data", "Errors", "Models", "Graphs"] :
         os.makedirs(f"{RESULTS_DIR}/{folder}", exist_ok=True)
 
-def clean_data(path_to_file: str) -> pd.DataFrame:
+def resolve_year_series(df: pd.DataFrame, dataset_label: str) -> pd.Series:
+    """
+    Resolves the crop year used for leave-one-year-out validation.
+
+    Args:
+        df: Raw dataset before categorical encoding.
+        dataset_label: Human-readable crop or dataset name for error messages.
+
+    Returns:
+        A Series of integer years aligned to the input DataFrame index.
+    """
+    for column in YEAR_COLUMN_CANDIDATES:
+        if column in df.columns:
+            years = pd.to_numeric(df[column], errors='coerce')
+            if years.notna().all():
+                return years.astype(int)
+
+    candidate_columns = list(DATE_COLUMN_CANDIDATES)
+    candidate_columns.extend([col for col in df.columns if "date" in col.lower() and col not in candidate_columns])
+
+    for column in candidate_columns:
+        if column in df.columns:
+            years = pd.to_datetime(df[column], errors='coerce').dt.year
+            if years.notna().all():
+                return years.astype(int)
+
+    raise ValueError(
+        f"Could not resolve a complete year series for {dataset_label}. "
+        f"Expected one of {YEAR_COLUMN_CANDIDATES} or parseable date columns."
+    )
+
+
+def clean_data(
+    path_to_file: str,
+    return_years: bool = False,
+    dataset_label: str = "dataset"
+) -> Union[pd.DataFrame, Tuple[pd.DataFrame, np.ndarray]]:
     """
     Cleans the input CSV by removing specific columns, handling missing values, and encoding categorical variables.
 
     Args:
         path_to_file: The system path to the CSV dataset.
+        return_years: When True, also returns years aligned to cleaned rows.
+        dataset_label: Human-readable crop or dataset name for error messages.
 
     Returns:
-        A cleaned and pre-processed pandas DataFrame.
+        A cleaned and pre-processed pandas DataFrame, optionally with aligned years.
     """
-    df = pd.read_csv(path_to_file).drop(columns=['Sl', 'GPS'], errors='ignore')
-    df = df.dropna(axis=1, how='all').fillna(df.median(numeric_only=True))
+    raw_df = pd.read_csv(path_to_file).drop(columns=['Sl', 'GPS'], errors='ignore')
+    year_series = resolve_year_series(raw_df, dataset_label) if return_years else None
+
+    df = raw_df.dropna(axis=1, how='all').fillna(raw_df.median(numeric_only=True))
     df = pd.get_dummies(df, drop_first=True).dropna()
     file_name = path_to_file.replace(".csv", f"_cleaned.csv").split("/")[-1]
     cleaned_data = df.loc[:, (df != df.iloc[0]).any()]
     cleaned_data.to_csv(f"{RESULTS_DIR}/Cleaned_Data/{file_name}", index=False)
+
+    if return_years:
+        aligned_years = year_series.loc[cleaned_data.index].to_numpy(dtype=int)
+        return cleaned_data, aligned_years
+
     return cleaned_data
 
 
@@ -76,7 +132,7 @@ def load_data() -> dict:
     rice_p = os.path.join(main_folder, RICE_DATASET_FILE)
 
     soy = clean_data(soy_p)
-    rice = clean_data(rice_p)
+    rice, rice_years = clean_data(rice_p, return_years=True, dataset_label="Rice")
     
     common = sorted(list(set(soy.columns) & set(rice.columns) - {'Yield'}))
     
@@ -100,6 +156,7 @@ def load_data() -> dict:
         'rice_X_comm': rice_X_comm_scaled,
         'rice_y_z': scaler_rice_y.fit_transform(rice[['Yield']]).flatten(),
         'rice_y_raw': rice['Yield'].values,
+        'rice_years': rice_years,
         'scaler_rice_y': scaler_rice_y,
         'input_dim_soy': len(common)
     }
@@ -174,6 +231,175 @@ def worker_task(
         return (np.sqrt(mean_squared_error(yv_raw, praw)) / np.mean(yv_raw)) * 100
     except: 
         return np.nan
+
+
+def calculate_error_metrics(y_true_raw: np.ndarray, y_pred_raw: np.ndarray) -> Dict[str, float]:
+    """
+    Calculates raw RMSE and normalized RMSE percentage for yield predictions.
+
+    Args:
+        y_true_raw: Observed yield values in original units.
+        y_pred_raw: Predicted yield values in original units.
+
+    Returns:
+        Dictionary with RMSE and NRMSE percentage.
+    """
+    rmse = float(np.sqrt(mean_squared_error(y_true_raw, y_pred_raw)))
+    mean_yield = float(np.mean(y_true_raw))
+    nrmse = np.nan if np.isclose(mean_yield, 0.0) else (rmse / mean_yield) * 100
+    return {"RMSE": rmse, "NRMSE_Percent": float(nrmse)}
+
+
+def evaluate_loyo_fold(
+    scenario_name: str,
+    left_out_year: int,
+    X: np.ndarray,
+    y_z: np.ndarray,
+    y_raw: np.ndarray,
+    years: np.ndarray,
+    input_dim: int,
+    params: dict,
+    weights: Optional[List[np.ndarray]],
+    scaler_y: StandardScaler
+) -> Dict[str, Union[str, int, float]]:
+    """
+    Trains on all years except one and evaluates on the held-out year.
+
+    Args:
+        scenario_name: Name of the transfer learning scenario.
+        left_out_year: Year excluded from training and used for testing.
+        X: Feature matrix for the scenario.
+        y_z: Standardized target values.
+        y_raw: Raw target values.
+        years: Year labels aligned to rows in X/y.
+        input_dim: Number of input features.
+        params: Hyperparameters selected by Optuna.
+        weights: Optional transfer weights.
+        scaler_y: Target scaler used to invert standardized predictions.
+
+    Returns:
+        One LOYO result row with metrics and fold metadata.
+    """
+    test_mask = years == left_out_year
+    train_mask = ~test_mask
+    train_rows = int(np.sum(train_mask))
+    test_rows = int(np.sum(test_mask))
+
+    result = {
+        "Scenario": scenario_name,
+        "Left_Out_Year": int(left_out_year),
+        "Train_Rows": train_rows,
+        "Test_Rows": test_rows,
+        "RMSE": np.nan,
+        "NRMSE_Percent": np.nan,
+        "Status": "Completed",
+        "Error": "",
+    }
+
+    if train_rows < MIN_LOYO_TRAIN_ROWS or test_rows < MIN_LOYO_TEST_ROWS:
+        result["Status"] = "Skipped"
+        result["Error"] = (
+            f"Insufficient rows for LOYO fold "
+            f"(train={train_rows}, test={test_rows})."
+        )
+        return result
+
+    try:
+        model = build_and_train(X[train_mask], y_z[train_mask], input_dim, params, weights)
+        pred_z = model.predict(X[test_mask], verbose=0).reshape(-1, 1)
+        pred_raw = scaler_y.inverse_transform(pred_z).flatten()
+        metrics = calculate_error_metrics(y_raw[test_mask], pred_raw)
+        result.update(metrics)
+    except Exception as exc:
+        result["Status"] = "Failed"
+        result["Error"] = str(exc)
+
+    return result
+
+
+def plot_loyo_results(loyo_df: pd.DataFrame) -> None:
+    """
+    Saves a year-by-year NRMSE comparison plot for completed LOYO folds.
+
+    Args:
+        loyo_df: DataFrame returned by run_loyo_evaluation.
+    """
+    completed_df = loyo_df[loyo_df["Status"] == "Completed"].copy()
+    if completed_df.empty:
+        print("LOYO plotting skipped: no completed folds.")
+        return
+
+    plt.figure(figsize=(12, 7))
+    pivot_df = completed_df.pivot(index="Left_Out_Year", columns="Scenario", values="NRMSE_Percent")
+    pivot_df.plot(kind="bar", ax=plt.gca())
+    plt.title("Leave-One-Year-Out Transfer Learning Evaluation")
+    plt.xlabel("Held-Out Year")
+    plt.ylabel("Normalized RMSE (%)")
+    plt.grid(True, axis="y")
+    plt.legend(title="Scenario")
+    plt.tight_layout()
+
+    loyo_plot_filename = f"NN_LOYO_NRMSE_{TIMESTAMP}.png"
+    plt.savefig(os.path.join(f"{RESULTS_DIR}/Graphs", loyo_plot_filename), dpi=300)
+    plt.show()
+
+
+def run_loyo_evaluation(
+    data: Dict,
+    scenarios: List[Tuple[str, np.ndarray, int, Optional[List[np.ndarray]]]],
+    best_params: Dict[str, Union[int, float]]
+) -> pd.DataFrame:
+    """
+    Runs leave-one-year-out evaluation after the random-split benchmark.
+
+    Args:
+        data: Loaded data dictionary containing rice features, targets, scaler, and years.
+        scenarios: Transfer learning scenarios to evaluate.
+        best_params: Hyperparameters selected for the neural network.
+
+    Returns:
+        DataFrame containing one row per scenario and held-out year.
+    """
+    years = np.asarray(data['rice_years'], dtype=int)
+    unique_years = sorted(np.unique(years))
+
+    if len(unique_years) < 2:
+        raise ValueError("LOYO requires at least two years of target-crop data.")
+
+    print(f"\nStarting LOYO Evaluation across {len(unique_years)} years: {unique_years}")
+    rows = []
+    for name, X, dim, weights in scenarios:
+        for left_out_year in unique_years:
+            print(f"LOYO Scenario: {name} | Held-out year: {left_out_year}")
+            rows.append(
+                evaluate_loyo_fold(
+                    name,
+                    left_out_year,
+                    X,
+                    data['rice_y_z'],
+                    data['rice_y_raw'],
+                    years,
+                    dim,
+                    best_params,
+                    weights,
+                    data['scaler_rice_y'],
+                )
+            )
+
+    loyo_df = pd.DataFrame(rows)
+    loyo_results_path = f"{RESULTS_DIR}/Errors/loyo_results_{TIMESTAMP}.csv"
+    loyo_df.to_csv(loyo_results_path, index=False)
+    plot_loyo_results(loyo_df)
+
+    print("\n--- LOYO Performance by Scenario (NRMSE %) ---")
+    completed_df = loyo_df[loyo_df["Status"] == "Completed"]
+    if completed_df.empty:
+        print("No completed LOYO folds.")
+    else:
+        for scenario_name, scenario_df in completed_df.groupby("Scenario"):
+            print(f"{scenario_name:12}: median={scenario_df['NRMSE_Percent'].median():.2f}%")
+
+    return loyo_df
     
 def optimize_hyperparameters(
     data: Dict, 
@@ -260,6 +486,7 @@ if __name__ == '__main__':
 
     combined_df = pd.DataFrame.from_dict(final_metrics, orient='index').transpose()
     combined_df.to_csv(f"{RESULTS_DIR}/Errors/final_results_{TIMESTAMP}.csv")
+    loyo_df = run_loyo_evaluation(data, scenarios, best_params)
 
     ## Boxplot
     plt.figure(figsize=(12, 7))
