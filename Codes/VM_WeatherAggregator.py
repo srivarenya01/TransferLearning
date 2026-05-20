@@ -121,9 +121,9 @@ class WeatherAggregatorUnified:
             # Construct sheet name (logic must match extraction script)
             date_label = pd.to_datetime(row['Planting_DT']).strftime('%Y-%m-%d')
             
-            # Use Sl for unique identification
-            sl_no = row['Sl']
-            sheet_name = f"Sl_{sl_no}_{date_label}"
+            # Use preserved Original_Index from Summary_Input if available, else loop idx
+            ref_idx = row.get('Original_Index', idx)
+            sheet_name = f"Row_{ref_idx}_{date_label}"
             safe_name = "".join([c for c in sheet_name if c.isalnum() or c in (' ', '_', '-')])[:31]
             
             if safe_name in all_sheets:

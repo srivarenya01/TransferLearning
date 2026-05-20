@@ -1,0 +1,6 @@
+Best architecture: {'n_layers': 3, 'lr': 0.0001980702568678114, 'n_units_l0': 122, 'n_units_l1': 110, 'n_units_l2': 41}
+
+--- Statistical Test Results (Independent Two-Sample T-test on NRMSE) ---
+Warm (Full) vs Cold (Full): t=-67.94, p=3.6821e-139
+Warm (Common) vs Cold (Common): t=-0.23, p=8.2022e-01
+Warm (Common) vs Warm (Full): t=235.44, p=2.1759e-244

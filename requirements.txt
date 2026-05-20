@@ -1,0 +1,9 @@
+matplotlib
+numpy
+pandas
+tqdm
+scikit-learn
+optuna
+seaborn
+scipy
+tensorflow
