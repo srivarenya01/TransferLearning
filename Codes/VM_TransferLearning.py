@@ -27,9 +27,9 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="keras")
 
 # Paths
 PARENT_DIR = Path(__file__).parent
-SOY_DATASET_FILE = str(PARENT_DIR) + "/Data/Processed/Soybean/soybean_with_harvesting_only.csv"
-RICE_DATASET_FILE = str(PARENT_DIR) + "/Data/Processed/Rice/rice_with_harvesting_only.csv"
-RESULTS_DIR = str(PARENT_DIR) + "/Results/NN_TransferLearning"
+SOY_DATASET_FILE = str(PARENT_DIR.parent) + "/DATA/soybean_with_harvesting_only.csv"
+RICE_DATASET_FILE = str(PARENT_DIR.parent) + "/DATA/rice_with_harvesting_only.csv"
+RESULTS_DIR = str(PARENT_DIR.parent) + "/Results"
 TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # Global Constants
@@ -107,7 +107,7 @@ def clean_data(
 
     df = raw_df.dropna(axis=1, how='all').fillna(raw_df.median(numeric_only=True))
     df = pd.get_dummies(df, drop_first=True).dropna()
-    file_name = path_to_file.replace(".csv", f"_cleaned.csv").split("/")[-1]
+    file_name = Path(path_to_file).stem + "_cleaned.csv"
     cleaned_data = df.loc[:, (df != df.iloc[0]).any()]
     cleaned_data.to_csv(f"{RESULTS_DIR}/Cleaned_Data/{file_name}", index=False)
 
@@ -127,14 +127,21 @@ def load_data() -> dict:
         A dictionary containing scaled feature matrices, scaled targets, 
         raw targets, and the target scaler.
     """
-    main_folder = os.path.dirname(os.path.realpath(__file__))
-    soy_p = os.path.join(main_folder, SOY_DATASET_FILE)
-    rice_p = os.path.join(main_folder, RICE_DATASET_FILE)
+    soy_p = SOY_DATASET_FILE
+    rice_p = RICE_DATASET_FILE
 
     soy = clean_data(soy_p)
     rice, rice_years = clean_data(rice_p, return_years=True, dataset_label="Rice")
     
-    common = sorted(list(set(soy.columns) & set(rice.columns) - {'Yield'}))
+    common = sorted(list((set(soy.columns) & set(rice.columns)) - {'Yield'}))
+    soy_only = sorted(list(set(soy.columns) - set(rice.columns)))
+    rice_only = sorted(list(set(rice.columns) - set(soy.columns)))
+    
+    print(f"\n--- Column Comparison ---")
+    print(f"Common Features ({len(common)}): {common[:5]}... (and more)")
+    print(f"Soybean Only ({len(soy_only)}): {soy_only[:5]}...")
+    print(f"Rice Only ({len(rice_only)}): {rice_only[:5]}...")
+    print(f"------------------------\n")
     
     print(f"Features Identified: {len(common)} Common | Soy: {len(soy)} rows | Rice: {len(rice)} rows")
 
@@ -144,7 +151,8 @@ def load_data() -> dict:
     soy_X_scaled = scaler_soy_X.fit_transform(soy[common])
     rice_X_comm_scaled = scaler_soy_X.transform(rice[common])
 
-    rice_X_full_scaled = scaler_rice_full_X.fit_transform(rice.drop(columns=['Yield']))
+    rice_features_full = list(rice.drop(columns=['Yield']).columns)
+    rice_X_full_scaled = scaler_rice_full_X.fit_transform(rice[rice_features_full])
 
     scaler_soy_y = StandardScaler()
     scaler_rice_y = StandardScaler()
@@ -158,10 +166,12 @@ def load_data() -> dict:
         'rice_y_raw': rice['Yield'].values,
         'rice_years': rice_years,
         'scaler_rice_y': scaler_rice_y,
-        'input_dim_soy': len(common)
+        'input_dim_soy': len(common),
+        'rice_features_full': rice_features_full,
+        'common_features': common
     }
 
-def build_and_train(X_train: np.ndarray, y_train: np.ndarray, input_dim:int, params:dict, weights:Optional[list[np.ndarray]]=None):
+def build_and_train(X_train: np.ndarray, y_train: np.ndarray, input_dim:int, params:dict, weights:Optional[List[np.ndarray]]=None):
     """
     Constructs and trains a Neural Network. Supports Transfer Learning through 
     weight initialization and two-phase fine-tuning.
@@ -251,6 +261,7 @@ def calculate_error_metrics(y_true_raw: np.ndarray, y_pred_raw: np.ndarray) -> D
 
 
 def evaluate_loyo_fold(
+    iteration: int,
     scenario_name: str,
     left_out_year: int,
     X: np.ndarray,
@@ -286,6 +297,7 @@ def evaluate_loyo_fold(
     test_rows = int(np.sum(test_mask))
 
     result = {
+        "Iteration": iteration,
         "Scenario": scenario_name,
         "Left_Out_Year": int(left_out_year),
         "Train_Rows": train_rows,
@@ -330,9 +342,8 @@ def plot_loyo_results(loyo_df: pd.DataFrame) -> None:
         return
 
     plt.figure(figsize=(12, 7))
-    pivot_df = completed_df.pivot(index="Left_Out_Year", columns="Scenario", values="NRMSE_Percent")
-    pivot_df.plot(kind="bar", ax=plt.gca())
-    plt.title("Leave-One-Year-Out Transfer Learning Evaluation")
+    sns.barplot(data=completed_df, x="Left_Out_Year", y="NRMSE_Percent", hue="Scenario")
+    plt.title("Leave-One-Year-Out Transfer Learning Evaluation (100 Iterations)")
     plt.xlabel("Held-Out Year")
     plt.ylabel("Normalized RMSE (%)")
     plt.grid(True, axis="y")
@@ -368,23 +379,34 @@ def run_loyo_evaluation(
 
     print(f"\nStarting LOYO Evaluation across {len(unique_years)} years: {unique_years}")
     rows = []
-    for name, X, dim, weights in scenarios:
-        for left_out_year in unique_years:
-            print(f"LOYO Scenario: {name} | Held-out year: {left_out_year}")
-            rows.append(
-                evaluate_loyo_fold(
-                    name,
-                    left_out_year,
-                    X,
-                    data['rice_y_z'],
-                    data['rice_y_raw'],
-                    years,
-                    dim,
-                    best_params,
-                    weights,
-                    data['scaler_rice_y'],
-                )
-            )
+    
+    with ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
+        futs = []
+        for name, X, dim, weights in scenarios:
+            for left_out_year in unique_years:
+                for i in range(NUM_ITERATIONS):
+                    futs.append(executor.submit(
+                        evaluate_loyo_fold,
+                        i,
+                        name,
+                        left_out_year,
+                        X,
+                        data['rice_y_z'],
+                        data['rice_y_raw'],
+                        years,
+                        dim,
+                        best_params,
+                        weights,
+                        data['scaler_rice_y']
+                    ))
+        
+        print("Processing LOYO Iterations...")
+        for f in tqdm(as_completed(futs), total=len(futs)):
+            try:
+                res = f.result()
+                rows.append(res)
+            except Exception as e:
+                print(f"Failure in 1 LOYO Process with exception: {e}")
 
     loyo_df = pd.DataFrame(rows)
     loyo_results_path = f"{RESULTS_DIR}/Errors/loyo_results_{TIMESTAMP}.csv"
@@ -447,6 +469,11 @@ def optimize_hyperparameters(
     study = optuna.create_study(direction='minimize')
     study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs)
     
+    import json
+    os.makedirs(f"{RESULTS_DIR}/Models", exist_ok=True)
+    with open(f"{RESULTS_DIR}/Models/optuna_best_params_{TIMESTAMP}.json", "w") as f:
+        json.dump(study.best_params, f, indent=4)
+
     return study.best_params
 
 
@@ -454,14 +481,24 @@ if __name__ == '__main__':
     folder_creation()
     data = load_data()
     
-    best_params = optimize_hyperparameters(data)
+    best_params = optimize_hyperparameters(data, n_trials=50)
 
     print("Training Base Soybean Model...")
     base_m = build_and_train(data['soy_X'], data['soy_y_z'], data['input_dim_soy'], best_params)
     w_soy = base_m.get_weights()
 
+    # Construct Transfer Weights for Full-Feature Rice Model
+    # We must map Soy features (sorted alphabetically) to their correct positions in the Rice Full set
     w0_rice_full = np.random.normal(scale=0.01, size=(data['rice_X_full'].shape[1], w_soy[0].shape[1]))
-    w0_rice_full[:data['input_dim_soy'], :] = w_soy[0]
+    
+    rice_cols = data['rice_features_full']
+    common_cols = data['common_features']
+    
+    # Map each common feature to its index in the full rice dataset
+    for i, col_name in enumerate(common_cols):
+        rice_idx = rice_cols.index(col_name)
+        w0_rice_full[rice_idx, :] = w_soy[0][i, :]
+        
     weights_full = [w0_rice_full] + w_soy[1:]
 
     scenarios = [
@@ -476,7 +513,7 @@ if __name__ == '__main__':
         for name, X, dim, weights in scenarios:
             print(f"Processing Scenario: {name}")
             futs = [executor.submit(worker_task, i, X, data['rice_y_z'], dim, best_params, weights, data['scaler_rice_y'], data['rice_y_raw']) for i in range(NUM_ITERATIONS)]
-            for f in tqdm(as_completed(futs), total=100):
+            for f in tqdm(as_completed(futs), total=NUM_ITERATIONS):
                 try :
                     res = f.result()
                     if not np.isnan(res): final_metrics[name].append(res)
@@ -500,7 +537,7 @@ if __name__ == '__main__':
         plt.text(i, median, f'{median:.2f}', ha='center', va='bottom', fontsize=10, color='blue')
 
     boxplot_filename = f"NN_Boxplot_{TIMESTAMP}.png"
-    plt.savefig(os.path.join(F"{RESULTS_DIR}/Graphs", boxplot_filename), dpi=300)
+    plt.savefig(os.path.join(f"{RESULTS_DIR}/Graphs", boxplot_filename), dpi=300)
     plt.show()
 
     plt.figure(figsize=(12, 7))
@@ -524,9 +561,16 @@ if __name__ == '__main__':
     t_warm_common_cold_common = ttest_ind(final_metrics["Warm_Common"], final_metrics["Cold_Common"])
     t_warm_common_warm_full = ttest_ind(final_metrics["Warm_Common"], final_metrics["Warm_Full"])
 
+    stats_output = (
+        f"Best architecture: {best_params}\n\n"
+        f"--- Statistical Test Results (Independent Two-Sample T-test on NRMSE) ---\n"
+        f"Warm (Full) vs Cold (Full): t={t_warm_full_cold_full.statistic:.2f}, p={t_warm_full_cold_full.pvalue:.4e}\n"
+        f"Warm (Common) vs Cold (Common): t={t_warm_common_cold_common.statistic:.2f}, p={t_warm_common_cold_common.pvalue:.4e}\n"
+        f"Warm (Common) vs Warm (Full): t={t_warm_common_warm_full.statistic:.2f}, p={t_warm_common_warm_full.pvalue:.4e}\n"
+    )
+
     print("Pipeline completed.")
-    print(f"Best architecture: {best_params}")
-    print("\n--- Statistical Test Results (Independent Two-Sample T-test on NRMSE) ---")
-    print(f"Warm (Full) vs Cold (Full): t={t_warm_full_cold_full.statistic:.2f}, p={t_warm_full_cold_full.pvalue:.4e}")
-    print(f"Warm (Common) vs Cold (Common): t={t_warm_common_cold_common.statistic:.2f}, p={t_warm_common_cold_common.pvalue:.4e}")
-    print(f"Warm (Common) vs Warm (Full): t={t_warm_common_warm_full.statistic:.2f}, p={t_warm_common_warm_full.pvalue:.4e}")
+    print(stats_output)
+
+    with open(f"{RESULTS_DIR}/Errors/statistical_tests_{TIMESTAMP}.txt", "w") as f:
+        f.write(stats_output)
