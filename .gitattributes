@@ -1,0 +1,3 @@
+# Slurm/bash scripts must keep LF endings; sbatch rejects DOS line breaks.
+*.slurm text eol=lf
+*.sh    text eol=lf

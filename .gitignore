@@ -12,7 +12,18 @@ venv/
 
 # Data
 Data
+DATA
 Cleaned_Data
 WriteUp
 *.csv
 *.xlsx
+
+# Run outputs are tracked
+!Results/**/*.csv
+
+# Local snapshot of the Transfer Learning archive (docs + data)
+Transfer_Learning/
+
+# Slurm job logs
+slurm/logs/*
+!slurm/logs/.gitkeep

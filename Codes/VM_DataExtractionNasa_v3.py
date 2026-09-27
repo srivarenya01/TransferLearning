@@ -18,12 +18,13 @@ PARENT_DIR: Path = Path(__file__).parent
 DATA_DIR: Path = PARENT_DIR / "Data"
 
 # Set these to the file you want to process
-INPUT_FILE: Path = DATA_DIR / "Processed/Soybean/Required_Columns.csv" 
+INPUT_FILE: Path = DATA_DIR / "Processed/Soybean/Required_Columns.csv"
 OUTPUT_FILE: Path = DATA_DIR / "Weather_Data_v3_full.xlsx"
 
 TEMP_DIR: Path = DATA_DIR / "temp_weather_v3" # Directory for temporary weather files
 NUM_ROWS: int = -1  # Set to -1 for all rows, or a positive integer for a subset
 # =============================================================================
+
 
 class NasaWeatherV3:
     """
@@ -36,17 +37,17 @@ class NasaWeatherV3:
         """
         self.met_store: str = "s3://nasa-power/merra2/temporal/power_merra2_daily_temporal_utc.zarr"
         self.sol_store: str = "s3://nasa-power/syn1deg/temporal/power_syn1deg_daily_temporal_utc.zarr"
-        
+
         self.param_mapping: Dict[str, str] = {
-            'T2M': 'Temperature',            
+            'T2M': 'Temperature',
             'T2M_MAX': 'Temperature Max',
             'T2M_MIN': 'Temperature Min',
-            'RH2M': 'Relative Humidity',    
-            'WS2M': 'Wind Speed',           
-            'PRECTOTCORR': 'Precipitation', 
-            'ALLSKY_SFC_SW_DWN': 'Solar Radiation' 
+            'RH2M': 'Relative Humidity',
+            'WS2M': 'Wind Speed',
+            'PRECTOTCORR': 'Precipitation',
+            'ALLSKY_SFC_SW_DWN': 'Solar Radiation'
         }
-        
+
         self.ds_met: Optional[xr.Dataset] = None
         self.ds_sol: Optional[xr.Dataset] = None
         self.cache: Dict[Tuple[float, float], Tuple[xr.Dataset, xr.Dataset]] = {}
@@ -59,14 +60,14 @@ class NasaWeatherV3:
         try:
             self.ds_met = xr.open_zarr(self.met_store, storage_options={"anon": True}, consolidated=True)
             self.ds_sol = xr.open_zarr(self.sol_store, storage_options={"anon": True}, consolidated=True)
-            
+
             # Ensure unique and monotonic coordinates for nearest-neighbor selection
             self.ds_met = self.ds_met.drop_duplicates('lat').drop_duplicates('lon').sortby(['lat', 'lon'])
             self.ds_sol = self.ds_sol.drop_duplicates('lat').drop_duplicates('lon').sortby(['lat', 'lon'])
-            
+
             met_vars = ['T2M', 'T2M_MAX', 'T2M_MIN', 'RH2M', 'WS2M', 'PRECTOTCORR']
             sol_vars = ['ALLSKY_SFC_SW_DWN']
-            
+
             self.ds_met = self.ds_met[[v for v in met_vars if v in self.ds_met.data_vars]]
             self.ds_sol = self.ds_sol[[v for v in sol_vars if v in self.ds_sol.data_vars]]
             print("Connected successfully.")
@@ -85,7 +86,7 @@ class NasaWeatherV3:
         """
         print(f"Pre-caching time-series ({start_year}-{end_year}) for {len(unique_coords)} locations...")
         time_slice = slice(f"{start_year}-01-01", f"{end_year}-12-31")
-        
+
         def _fetch_coord(lat: float, lon: float) -> Tuple[Tuple[float, float], Optional[Tuple[xr.Dataset, xr.Dataset]]]:
             try:
                 m = self.ds_met.sel(lat=lat, lon=lon, method='nearest').sel(time=time_slice).load()
@@ -118,30 +119,31 @@ class NasaWeatherV3:
         coord = (lat, lon)
         if coord not in self.cache:
             return None
-            
+
         m_ds, s_ds = self.cache[coord]
         try:
             m_df = m_ds.sel(time=slice(start_date, end_date)).to_dataframe().drop(columns=['lat', 'lon'], errors='ignore')
             s_df = s_ds.sel(time=slice(start_date, end_date)).to_dataframe().drop(columns=['lat', 'lon'], errors='ignore')
-        except:
+        except Exception:
             return None
-            
+
         df = pd.concat([m_df, s_df], axis=1)
         if df.empty:
             return None
-            
+
         if 'ALLSKY_SFC_SW_DWN' in df.columns:
             df['ALLSKY_SFC_SW_DWN'] = (df['ALLSKY_SFC_SW_DWN'] * 0.0864).round(2)
-            
+
         df = df.reset_index().set_index('time')
         df = df.rename(columns=self.param_mapping)
-        
+
         for col in ['Temperature', 'Temperature Max', 'Temperature Min', 'Relative Humidity', 'Wind Speed', 'Precipitation']:
             if col in df.columns:
                 df[col] = df[col].round(2)
-        
+
         cols = [c for c in self.param_mapping.values() if c in df.columns]
         return df[cols]
+
 
 def parse_gps(gps_str: str) -> Tuple[Optional[float], Optional[float]]:
     """
@@ -157,8 +159,9 @@ def parse_gps(gps_str: str) -> Tuple[Optional[float], Optional[float]]:
         s = str(gps_str).strip('"').strip()
         lat, lon = map(float, s.split(','))
         return lat, lon
-    except:
+    except (TypeError, ValueError):
         return None, None
+
 
 def doy_to_date(year: int, doy: int) -> Optional[datetime]:
     """
@@ -173,8 +176,9 @@ def doy_to_date(year: int, doy: int) -> Optional[datetime]:
     """
     try:
         return datetime(int(year), 1, 1) + timedelta(days=int(doy) - 1)
-    except:
+    except (TypeError, ValueError, OverflowError):
         return None
+
 
 def prepare_dataframe(df: pd.DataFrame, file_path: Path) -> pd.DataFrame:
     """
@@ -188,7 +192,7 @@ def prepare_dataframe(df: pd.DataFrame, file_path: Path) -> pd.DataFrame:
         A cleaned DataFrame with DT columns and GPS coordinates.
     """
     df = df.copy()
-    
+
     if 'GPS' in df.columns:
         df['lat'], df['lon'] = zip(*df['GPS'].apply(parse_gps))
     else:
@@ -205,10 +209,10 @@ def prepare_dataframe(df: pd.DataFrame, file_path: Path) -> pd.DataFrame:
 
     is_rice = "rice" in str(file_path).lower() or 'Rice' in str(file_path)
     offset = 10 if is_rice else 5
-    
+
     # Initialize with NaT to allow priority-based fillna
     df['Emergence_DT'] = pd.NaT
-    
+
     # Priority 1: Use DOY column if present
     if 'days_from_year_start_Emergence' in df.columns and 'Year' in df.columns:
         valid_mask = df['days_from_year_start_Emergence'].notna()
@@ -216,17 +220,18 @@ def prepare_dataframe(df: pd.DataFrame, file_path: Path) -> pd.DataFrame:
             df.loc[valid_mask, 'Emergence_DT'] = df[valid_mask].apply(
                 lambda x: doy_to_date(x['Year'], x['days_from_year_start_Emergence']), axis=1
             )
-    
+
     # Priority 2: Use Emergence_Date if present
     if 'Emergence_Date' in df.columns:
         df['Emergence_DT'] = df['Emergence_DT'].fillna(pd.to_datetime(df['Emergence_Date']))
-        
+
     # Priority 3: Fallback calculation (Planting + Offset)
     df['Emergence_DT'] = df['Emergence_DT'].fillna(df['Planting_DT'] + timedelta(days=offset))
-    
+
     df['Emergence_Offset_Days'] = (df['Emergence_DT'] - df['Planting_DT']).dt.days
 
     return df.dropna(subset=['lat', 'lon', 'Planting_DT', 'Harvesting_DT'])
+
 
 def process_and_save_temp(args: Tuple[int, pd.Series, NasaWeatherV3]) -> bool:
     """
@@ -257,13 +262,13 @@ if __name__ == "__main__":
 
     df_raw = pd.read_csv(INPUT_FILE)
     df_input = prepare_dataframe(df_raw, INPUT_FILE)
-    
+
     if TEMP_DIR.exists():
         shutil.rmtree(TEMP_DIR)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
     unique_coords = df_input[['lat', 'lon']].drop_duplicates()
-    
+
     nasa = NasaWeatherV3()
     nasa.connect()
     nasa.cache_locations(unique_coords)
@@ -281,7 +286,7 @@ if __name__ == "__main__":
             results.append(future.result())
 
     print(f"Successfully processed {sum(results)} / {len(results)} rows.")
-    
+
     temp_files = sorted(list(TEMP_DIR.glob("*.parquet")))
     if not temp_files:
         print("No weather data extracted.")
@@ -290,13 +295,13 @@ if __name__ == "__main__":
     print(f"Merging results into {OUTPUT_FILE}...")
     with pd.ExcelWriter(OUTPUT_FILE, engine='xlsxwriter') as writer:
         df_input.to_excel(writer, sheet_name="Summary_Input", index=False)
-        
+
         for f in tqdm(temp_files, desc="Writing Excel Sheets"):
-            sheet_name = f.stem[6:] 
+            sheet_name = f.stem[6:]
             df = pd.read_parquet(f)
             df.to_excel(writer, sheet_name=sheet_name)
-    
+
     if TEMP_DIR.exists():
         shutil.rmtree(TEMP_DIR)
-    
+
     print(f"DONE! Output saved to: {OUTPUT_FILE}")

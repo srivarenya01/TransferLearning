@@ -1,50 +1,41 @@
 # Cross-Crop Yield Prediction via Transfer Learning
 
-This repository contains a transfer learning pipeline designed to solve the challenge of crop yield prediction in data-scarce environments. By leveraging Transfer Learning, the project adapts knowledge gained from data-rich crops (e.g., Soybeans) to accurately predict yields for crops with limited historical data (e.g., Rice), integrated with high-resolution NASA POWER meteorological data.
+Predicting rice yield with a neural network pre-trained on soybean. Soybean has more trial data, rice has less, and both are paired with NASA POWER weather. The question is whether starting the rice network from soybean weights (warm start) beats training it from scratch (cold start).
 
-## Repository Architecture
+## Repository layout
 
-This repository is optimized for clarity and reproducibility, focusing on the core computational pipeline and validated results.
+- [`Codes/`](Codes/README.md): weather extraction, weather aggregation, and the transfer-learning pipeline.
+- [`Results/`](Results/README.md): error tables, plots, saved models, and the feature inventory from each run.
+- [`slurm/`](slurm/README.md): batch job for TAMU HPRC Grace.
 
-- **`Codes/`**
-  - Contains the end-to-end processing pipeline.
-  - Automated data extraction from NASA AWS S3 buckets.
-  - Feature engineering and weather aggregation modules.
-  - Neural Network model implementations with Optuna hyperparameter optimization.
+## Getting started
 
-- **`Results/`**
-  - Comprehensive performance metrics (NRMSE, RMSE).
-  - Comparative analysis of "Hot Start" (Transfer) vs. "Cold Start" (Direct) training.
-  - Visualizations: Error distribution density plots, performance boxplots, and statistical validation.
+Create a virtual environment and install the dependencies:
 
-## Getting Started
-
-### 1. Environment Setup
-Clone the repository and initialize a virtual environment:
 ```bash
 python -m venv venv
-source venv/bin/activate  # On Windows: .\venv\Scripts\activate
+source venv/bin/activate        # Windows: .\venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-### 2. Install Dependencies
-The pipeline requires high-performance data processing and ML libraries:
-```bash
-pip install tensorflow xarray pandas scikit-learn optuna s3fs
-```
+The weather extraction step also needs `xarray` and `s3fs`.
 
-### 3. Execution Flow
-Navigate to the `Codes/` directory and execute the pipeline:
-1. **Extraction**: `VM_DataExtractionNasa_v3.py`
-2. **Aggregation**: `VM_WeatherAggregator.py`
-3. **Training**: `VM_TransferLearning.py`
+## Running the pipeline
 
-## Core Technologies
+The scripts live in `Codes/` and run in this order:
 
-| Category | Tools |
+1. `VM_DataExtractionNasa_v3.py` downloads daily NASA POWER weather for each plot.
+2. `VM_WeatherAggregator.py` turns the daily weather into season totals and counts.
+3. `VM_TransferLearning.py` trains and evaluates the four scenarios from `DATA/soybean_with_harvesting_only.csv` and `DATA/rice_with_harvesting_only.csv`.
+
+A full training run (Optuna search, 400 random-split fits, 1,200 leave-one-year-out fits) needs a cluster node. The worker pool follows `SLURM_CPUS_PER_TASK`. On Grace, run `sbatch slurm/run_transfer_learning.slurm` from the repository root; it sets up the venv and runs everything on one node. See [`slurm/README.md`](slurm/README.md).
+
+## Tools
+
+| Purpose | Libraries |
 | :--- | :--- |
-| **Deep Learning** | TensorFlow, Keras |
-| **Hyperparameter Tuning** | Optuna |
-| **Data Engineering** | Xarray, Pandas, S3FS |
-| **Weather Data** | NASA POWER (Meteorology & Solar Energy) |
-
-*Developed for research in Agricultural AI and Remote Sensing.*
+| Neural networks | TensorFlow, Keras |
+| Hyperparameter search | Optuna |
+| Statistics and plots | SciPy, Matplotlib, Seaborn |
+| Data handling | Pandas, Xarray, S3FS |
+| Weather source | NASA POWER |
