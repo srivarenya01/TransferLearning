@@ -10,6 +10,7 @@
 #     VENV_DIR        Virtual environment location   (default: $SCRATCH/venvs/vm_transfer_learning)
 #     PYTHON_MODULES  Lmod modules providing Python   (default: "GCCcore/12.3.0 Python/3.11.3")
 #     FORCE_REINSTALL Set to 1 to rebuild the venv from scratch
+#     VM_SHARED_SCALING  soybean or per_crop scaling of rice's shared features (default: soybean)
 #
 # See slurm/README.md for details.
 
@@ -32,6 +33,7 @@ set -eo pipefail
 VENV_DIR="${VENV_DIR:-${SCRATCH}/venvs/vm_transfer_learning}"
 PYTHON_MODULES="${PYTHON_MODULES:-GCCcore/12.3.0 Python/3.11.3}"
 FORCE_REINSTALL="${FORCE_REINSTALL:-0}"
+export VM_SHARED_SCALING="${VM_SHARED_SCALING:-soybean}"
 
 REPO_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 SCRIPT_PATH="${REPO_DIR}/Codes/VM_TransferLearning.py"
@@ -53,6 +55,10 @@ preflight() {
         [[ -s "${f}" ]] || fail "Missing or empty input file: ${f}"
     done
     [[ -n "${SCRATCH}" ]] || fail "\$SCRATCH is not set; set VENV_DIR explicitly."
+    case "${VM_SHARED_SCALING}" in
+        soybean|per_crop) ;;
+        *) fail "VM_SHARED_SCALING must be soybean or per_crop, got '${VM_SHARED_SCALING}'." ;;
+    esac
 }
 
 load_modules() {
@@ -121,7 +127,7 @@ main() {
     export OPENBLAS_NUM_THREADS=1
 
     cd "${REPO_DIR}"
-    log "Starting Codes/VM_TransferLearning.py with ${SLURM_CPUS_PER_TASK:-$(nproc)} workers"
+    log "Starting Codes/VM_TransferLearning.py with ${SLURM_CPUS_PER_TASK:-$(nproc)} workers | shared scaling=${VM_SHARED_SCALING}"
     local start=${SECONDS}
     python "${SCRIPT_PATH}"
     log "Finished in $(( (SECONDS - start) / 60 )) min $(( (SECONDS - start) % 60 )) s. Outputs: ${REPO_DIR}/Results"

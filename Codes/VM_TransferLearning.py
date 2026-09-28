@@ -5,10 +5,17 @@ Tunes a source network on soybean, maps its first-layer weights onto rice,
 and compares warm vs cold start on the full rice feature set and on the
 features shared with soybean. Every result is reported as RMSE and NRMSE.
 
-Shared features are always in soybean units, so transferred weights see the
-units they were trained on. Rice-only features and yield are scaled on each
-split's training rows. Warm and cold networks use the same seeds and training
-schedule, so the only difference between them is the starting weights.
+Rice-only features and yield are scaled on each split's training rows. How
+rice's shared features are scaled is set by VM_SHARED_SCALING:
+
+    soybean   (default) Soybean's scaler, so transferred weights see the
+              units they were trained on.
+    per_crop  Rice's own training rows, like soybean is scaled on its own
+              rows. Both crops are then centered at 0, and a value means
+              "relative to that crop's usual season".
+
+Warm and cold networks use the same seeds and training schedule, so the only
+difference between them is the starting weights.
 """
 import os
 # One op thread per worker process. Has to be set before NumPy/TensorFlow start their thread pools.
@@ -75,6 +82,10 @@ MIN_LOYO_TEST_ROWS = 1
 ID_COLUMNS = ("Sl", "GPS")
 # Yield is computed from harvested grain weight corrected to a standard moisture.
 HARVEST_OUTCOME_PREFIXES = ("harvest.weight", "harvest.moisture")
+
+# Scaling applied to rice's shared features (see module docstring)
+SHARED_SCALING_MODES = ("soybean", "per_crop")
+SHARED_SCALING = os.environ.get("VM_SHARED_SCALING", "soybean")
 
 # Training schedule shared by warm and cold networks
 HEAD_EPOCHS = 10
@@ -301,21 +312,37 @@ def clean_data(
     return cleaned_data
 
 
-def load_data() -> dict:
+def load_data(shared_scaling: str = SHARED_SCALING) -> dict:
     """
     Load both crops, align their shared features, and prepare model inputs.
 
-    Shared features are always expressed in soybean units (a scaler fit on
-    soybean rows only), in both the shared-feature and full rice matrices, so
-    transferred first-layer weights read the same units they were trained on.
-    Rice-only columns are returned unscaled and listed in `rice_only_idx`;
-    evaluation code scales them per split, so no held-out rice row ever informs
-    a scaler.
+    Soybean features are always standardized on soybean rows. Rice's shared
+    features depend on `shared_scaling`:
+
+        soybean   Transformed here with the soybean scaler, in both the
+                  shared-feature and full rice matrices. Only rice-only
+                  columns are left for per-split scaling.
+        per_crop  Left unscaled here. Every rice column, shared or not, is
+                  standardized per split on that split's training rows.
+
+    `rice_full_fit_idx` and `rice_comm_fit_idx` list the columns evaluation
+    code scales per split, so no held-out rice row ever informs a scaler.
+
+    Args:
+        shared_scaling: One of SHARED_SCALING_MODES.
 
     Returns:
-        A dictionary of feature matrices, raw targets, the soybean scalers used
-        to train the source network, and feature bookkeeping.
+        A dictionary of feature matrices, raw targets, per-split scaling
+        columns, and feature bookkeeping.
+
+    Raises:
+        ValueError: If `shared_scaling` is not a known mode.
     """
+    if shared_scaling not in SHARED_SCALING_MODES:
+        raise ValueError(
+            f"Unknown shared scaling '{shared_scaling}'. Expected one of {SHARED_SCALING_MODES}."
+        )
+
     soy_p = SOY_DATASET_FILE
     rice_p = RICE_DATASET_FILE
     print(f"Soybean data: {soy_p}")
@@ -343,21 +370,31 @@ def load_data() -> dict:
     scaler_soy_y = StandardScaler().fit(soy_y_raw.reshape(-1, 1))
 
     rice_features_full = list(rice.drop(columns=['Yield']).columns)
-    rice_X_comm = scaler_soy_X.transform(rice[common].to_numpy(dtype=float))
-
+    rice_X_comm = rice[common].to_numpy(dtype=float)
     rice_X_full = rice[rice_features_full].to_numpy(dtype=float)
     common_idx = np.array([rice_features_full.index(col) for col in common], dtype=int)
-    rice_X_full[:, common_idx] = rice_X_comm
     rice_only_idx = np.setdiff1d(np.arange(len(rice_features_full)), common_idx)
 
+    if shared_scaling == "soybean":
+        rice_X_comm = scaler_soy_X.transform(rice_X_comm)
+        rice_X_full[:, common_idx] = rice_X_comm
+        rice_full_fit_idx = rice_only_idx
+        rice_comm_fit_idx = None
+    else:
+        rice_full_fit_idx = np.arange(len(rice_features_full))
+        rice_comm_fit_idx = np.arange(len(common))
+
     return {
+        'shared_scaling': shared_scaling,
         'soy_X_raw': soy_X_raw,
         'soy_y_raw': soy_y_raw,
         'soy_X': scaler_soy_X.transform(soy_X_raw),
         'soy_y_z': scaler_soy_y.transform(soy_y_raw.reshape(-1, 1)).flatten(),
         'rice_X_full': rice_X_full,
         'rice_only_idx': rice_only_idx,
+        'rice_full_fit_idx': rice_full_fit_idx,
         'rice_X_comm': rice_X_comm,
+        'rice_comm_fit_idx': rice_comm_fit_idx,
         'rice_y_raw': rice['Yield'].to_numpy(dtype=float),
         'rice_years': rice_years,
         'input_dim_soy': len(common),
@@ -386,7 +423,8 @@ def prepare_split(
         y_train_raw: Training yield in original units.
         fit_columns: Column indices to standardize with this split's training
             rows. Other columns are already on a fixed scale (shared features
-            in soybean units) and are left untouched. None scales nothing.
+            in soybean units when VM_SHARED_SCALING=soybean) and are left
+            untouched. None scales nothing.
 
     Returns:
         Scaled training features, scaled test features, standardized training
@@ -975,6 +1013,17 @@ def plot_metric_boxplot(values_by_scenario: Dict[str, List[float]], ylabel: str,
 if __name__ == '__main__':
     folder_creation()
     data = load_data()
+    print(f"Shared feature scaling: {data['shared_scaling']}")
+    save_json(f"{RESULTS_DIR}/Models/run_config_{TIMESTAMP}.json", {
+        "shared_scaling": data['shared_scaling'],
+        "num_iterations": NUM_ITERATIONS,
+        "num_workers": NUM_WORKERS,
+        "global_seed": GLOBAL_SEED,
+        "head_epochs": HEAD_EPOCHS,
+        "max_fine_tune_epochs": MAX_FINE_TUNE_EPOCHS,
+        "early_stopping_patience": EARLY_STOPPING_PATIENCE,
+        "batch_size": BATCH_SIZE,
+    })
 
     best_params = optimize_hyperparameters(data, n_trials=50)
 
@@ -1006,10 +1055,10 @@ if __name__ == '__main__':
     weights_full = [w0_rice_full] + w_soy[1:]
 
     scenarios: List[Scenario] = [
-        ("Warm_Full", data['rice_X_full'], data['rice_X_full'].shape[1], weights_full, data['rice_only_idx']),
-        ("Cold_Full", data['rice_X_full'], data['rice_X_full'].shape[1], None, data['rice_only_idx']),
-        ("Warm_Common", data['rice_X_comm'], data['input_dim_soy'], w_soy, None),
-        ("Cold_Common", data['rice_X_comm'], data['input_dim_soy'], None, None)
+        ("Warm_Full", data['rice_X_full'], data['rice_X_full'].shape[1], weights_full, data['rice_full_fit_idx']),
+        ("Cold_Full", data['rice_X_full'], data['rice_X_full'].shape[1], None, data['rice_full_fit_idx']),
+        ("Warm_Common", data['rice_X_comm'], data['input_dim_soy'], w_soy, data['rice_comm_fit_idx']),
+        ("Cold_Common", data['rice_X_comm'], data['input_dim_soy'], None, data['rice_comm_fit_idx'])
     ]
 
     nrmse_metrics = {s[0]: [] for s in scenarios}
@@ -1078,6 +1127,7 @@ if __name__ == '__main__':
     completed_loyo = loyo_df[loyo_df["Status"] == "Completed"]
     stats_lines = [
         f"Best architecture: {best_params}",
+        f"Shared feature scaling: {data['shared_scaling']}",
         f"Common encoded features: {data['n_common_features']}",
         f"Soybean rows: {data['soy_rows']} | Rice rows: {data['rice_rows']}",
         (
