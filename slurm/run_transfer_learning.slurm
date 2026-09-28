@@ -10,7 +10,8 @@
 #     VENV_DIR        Virtual environment location   (default: $SCRATCH/venvs/vm_transfer_learning)
 #     PYTHON_MODULES  Lmod modules providing Python   (default: "GCCcore/12.3.0 Python/3.11.3")
 #     FORCE_REINSTALL Set to 1 to rebuild the venv from scratch
-#     VM_SHARED_SCALING  soybean or per_crop scaling of rice's shared features (default: soybean)
+#     VM_SHARED_SCALING  Comma-separated scaling modes to run for rice's shared features
+#                        (default: soybean,per_crop)
 #
 # See slurm/README.md for details.
 
@@ -33,7 +34,7 @@ set -eo pipefail
 VENV_DIR="${VENV_DIR:-${SCRATCH}/venvs/vm_transfer_learning}"
 PYTHON_MODULES="${PYTHON_MODULES:-GCCcore/12.3.0 Python/3.11.3}"
 FORCE_REINSTALL="${FORCE_REINSTALL:-0}"
-export VM_SHARED_SCALING="${VM_SHARED_SCALING:-soybean}"
+export VM_SHARED_SCALING="${VM_SHARED_SCALING:-soybean,per_crop}"
 
 REPO_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 SCRIPT_PATH="${REPO_DIR}/Codes/VM_TransferLearning.py"
@@ -55,10 +56,15 @@ preflight() {
         [[ -s "${f}" ]] || fail "Missing or empty input file: ${f}"
     done
     [[ -n "${SCRATCH}" ]] || fail "\$SCRATCH is not set; set VENV_DIR explicitly."
-    case "${VM_SHARED_SCALING}" in
-        soybean|per_crop) ;;
-        *) fail "VM_SHARED_SCALING must be soybean or per_crop, got '${VM_SHARED_SCALING}'." ;;
-    esac
+    local mode modes
+    IFS=',' read -ra modes <<< "${VM_SHARED_SCALING}"
+    (( ${#modes[@]} > 0 )) || fail "VM_SHARED_SCALING is empty."
+    for mode in "${modes[@]}"; do
+        case "${mode}" in
+            soybean|per_crop) ;;
+            *) fail "VM_SHARED_SCALING entries must be soybean or per_crop, got '${mode}'." ;;
+        esac
+    done
 }
 
 load_modules() {
@@ -106,9 +112,6 @@ import matplotlib, numpy, optuna, pandas, scipy, seaborn, sklearn, tensorflow as
 print(f"python {sys.version.split()[0]} | tensorflow {tf.__version__} | numpy {numpy.__version__} | "
       f"pandas {pandas.__version__} | sklearn {sklearn.__version__} | optuna {optuna.__version__} | "
       f"matplotlib {matplotlib.__version__} | scipy {scipy.__version__} | seaborn {seaborn.__version__}")
-major, minor = (int(x) for x in matplotlib.__version__.split(".")[:2])
-if (major, minor) < (3, 9):
-    sys.exit("matplotlib >= 3.9 is required (boxplot tick_labels)")
 PY
 }
 
