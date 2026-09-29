@@ -102,6 +102,8 @@ DATE_COLUMN_CANDIDATES = (
 ID_COLUMNS = ("Sl", "GPS")
 # Yield is computed from harvested grain weight corrected to a standard moisture.
 HARVEST_OUTCOME_PREFIXES = ("harvest.weight", "harvest.moisture")
+# Harvest day of year is only known at harvest, so it is not a pre-harvest input.
+HARVEST_TIMING_MARKERS = ("days_from_year_start_harvest",)
 
 # Scaling of rice's shared features (see module docstring). Comma-separated.
 SHARED_SCALING_MODES = ("soybean", "per_crop")
@@ -295,8 +297,9 @@ def find_harvest_outcome_columns(df: pd.DataFrame) -> List[str]:
     """
     List harvest measurements that the yield target is derived from.
 
-    Matching is by name prefix after normalizing separators, so trait-ontology
-    suffixes such as `.LSU_01.0000137` and `_` vs `.` spellings are covered.
+    Columns whose normalized name contains a harvest-timing marker (for
+    example `days_from_year_start_harvest`) are included, because that day
+    is only known at harvest.
 
     Args:
         df: Raw dataset before categorical encoding.
@@ -307,9 +310,11 @@ def find_harvest_outcome_columns(df: pd.DataFrame) -> List[str]:
     def normalize(name: str) -> str:
         return name.lower().replace("_", ".").replace(" ", ".")
 
+    timing = tuple(marker.lower().replace("_", ".") for marker in HARVEST_TIMING_MARKERS)
     return [
         col for col in df.columns
         if normalize(col).startswith(HARVEST_OUTCOME_PREFIXES)
+        or any(marker in normalize(col) for marker in timing)
     ]
 
 
@@ -319,7 +324,9 @@ def clean_data(
     dataset_label: str = "dataset"
 ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, np.ndarray]]:
     """
-    Cleans the input CSV by removing ID, calendar, and harvest-outcome columns, handling missing values, and encoding categorical variables.
+    Cleans the input CSV by removing ID, calendar, harvest-outcome, and
+    harvest-timing columns, handling missing values, and encoding categoricals.
+
 
     The crop year is read before calendar columns are dropped, so LOYO folds
     still work while the year itself never reaches the model.

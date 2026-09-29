@@ -771,7 +771,8 @@ def filled_curves(epochs: pd.DataFrame, results: pd.DataFrame) -> pd.DataFrame:
     values = wide.to_numpy()
     values = np.where(np.isnan(values), final[:, None], values)
     filled = pd.DataFrame(values, index=wide.index, columns=pd.Index(wide.columns, name="Epoch"))
-    return filled.stack(dropna=False).rename("Test_NRMSE").reset_index()
+    # melt rather than stack: pandas 3 rejects stack(dropna=False), which is how Grace 3.0.6 crashed.
+    return filled.reset_index().melt(id_vars=list(filled.index.names), var_name="Epoch", value_name="Test_NRMSE")
 
 
 def plot_epoch_curves(curves: pd.DataFrame, feature_set: str, filename: str) -> None:
