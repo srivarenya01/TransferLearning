@@ -112,6 +112,8 @@ HEAD_EPOCHS = 10
 MAX_FINE_TUNE_EPOCHS = 50
 EARLY_STOPPING_PATIENCE = 5
 BATCH_SIZE = 32
+# Standard deviation of the starting weights for rice-only inputs in the warm full network
+RICE_ONLY_INIT_SCALE = 0.01
 
 # Scenario name -> (rice feature set, starts from soybean weights)
 SCENARIOS = {
@@ -686,7 +688,7 @@ def map_source_weights(source_weights: List[np.ndarray], data: dict, source_inde
     """
     rng = np.random.default_rng(GLOBAL_SEED + source_index)
     first_layer = rng.normal(
-        scale=0.01, size=(len(data['rice_features_full']), source_weights[0].shape[1])
+        scale=RICE_ONLY_INIT_SCALE, size=(len(data['rice_features_full']), source_weights[0].shape[1])
     )
     first_layer[data['common_idx'], :] = source_weights[0]
     return {"common": source_weights, "full": [first_layer] + source_weights[1:]}

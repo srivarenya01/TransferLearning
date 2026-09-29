@@ -12,6 +12,8 @@
 #     FORCE_REINSTALL Set to 1 to rebuild the venv from scratch
 #     VM_SHARED_SCALING  Comma-separated scaling modes to run for rice's shared features
 #                        (default: soybean,per_crop)
+#     VM_SCRIPT       Python script under Codes/ to run   (default: VM_TransferLearning.py;
+#                     slurm/run_convergence.slurm sets VM_Convergence.py)
 #
 # See slurm/README.md for details.
 
@@ -36,8 +38,10 @@ PYTHON_MODULES="${PYTHON_MODULES:-GCCcore/12.3.0 Python/3.11.3}"
 FORCE_REINSTALL="${FORCE_REINSTALL:-0}"
 export VM_SHARED_SCALING="${VM_SHARED_SCALING:-soybean,per_crop}"
 
+VM_SCRIPT="${VM_SCRIPT:-VM_TransferLearning.py}"
+
 REPO_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
-SCRIPT_PATH="${REPO_DIR}/Codes/VM_TransferLearning.py"
+SCRIPT_PATH="${REPO_DIR}/Codes/${VM_SCRIPT}"
 REQUIREMENTS="${REPO_DIR}/requirements.txt"
 REQUIRED_DATA=(
     "${REPO_DIR}/DATA/soybean_with_harvesting_only.csv"
@@ -49,6 +53,7 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 fail() { log "ERROR: $*" >&2; exit 1; }
 
 preflight() {
+    [[ "${VM_SCRIPT}" != */* ]] || fail "VM_SCRIPT must be a file name under Codes/, got '${VM_SCRIPT}'."
     [[ -f "${SCRIPT_PATH}" ]] || fail "Missing ${SCRIPT_PATH}. Submit this job from the repository root."
     [[ -f "${REQUIREMENTS}" ]] || fail "Missing ${REQUIREMENTS}."
     local f
@@ -130,7 +135,7 @@ main() {
     export OPENBLAS_NUM_THREADS=1
 
     cd "${REPO_DIR}"
-    log "Starting Codes/VM_TransferLearning.py with ${SLURM_CPUS_PER_TASK:-$(nproc)} workers | shared scaling=${VM_SHARED_SCALING}"
+    log "Starting Codes/${VM_SCRIPT} with ${SLURM_CPUS_PER_TASK:-$(nproc)} workers | shared scaling=${VM_SHARED_SCALING}"
     local start=${SECONDS}
     python "${SCRIPT_PATH}"
     log "Finished in $(( (SECONDS - start) / 60 )) min $(( (SECONDS - start) % 60 )) s. Outputs: ${REPO_DIR}/Results"
