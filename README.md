@@ -27,8 +27,10 @@ The scripts live in `Codes/` and run in this order:
 1. `VM_DataExtractionNasa_v3.py` downloads daily NASA POWER weather for each plot.
 2. `VM_WeatherAggregator.py` turns the daily weather into season totals and counts.
 3. `VM_TransferLearning.py` trains and evaluates the four scenarios from `DATA/soybean_with_harvesting_only.csv` and `DATA/rice_with_harvesting_only.csv`.
+4. `VM_Convergence.py` (optional) holds the rice test rows fixed and grows the training share from 0% to 100%, scoring Warm vs Cold (and three controls) after every epoch.
+5. `VM_TransferIdeas.py` (optional) tries quantile alignment, overlap features, climate-matched soybean, a soybean score feature, and a joint crop-flag network.
 
-A full training run (Optuna search, 400 random-split fits, 1,200 leave-one-year-out fits) needs a cluster node. The worker pool follows `SLURM_CPUS_PER_TASK`. On Grace, run `sbatch slurm/run_transfer_learning.slurm` from the repository root; it sets up the venv and runs everything on one node. See [`slurm/README.md`](slurm/README.md).
+A full training run (Optuna search, five soybean source networks, and about 5,000 rice fits across two scaling modes, five training sizes, random splits, and leave-one-year-out) needs a cluster node. The worker pool follows `SLURM_CPUS_PER_TASK`. On Grace, run `sbatch slurm/run_transfer_learning.slurm` from the repository root; it sets up the venv and runs everything on one node. For the sparse-data / epoch-curve run, `sbatch slurm/run_convergence.slurm`. For the follow-up transfer methods, `sbatch slurm/run_transfer_ideas.slurm`. See [`slurm/README.md`](slurm/README.md).
 
 ## Tools
 

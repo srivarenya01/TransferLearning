@@ -68,8 +68,24 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="keras")
 
 # Paths
 REPO_DIR = Path(__file__).resolve().parent.parent
-SOY_DATASET_FILE = str(REPO_DIR / "DATA" / "soybean_with_harvesting_only.csv")
-RICE_DATASET_FILE = str(REPO_DIR / "DATA" / "rice_with_harvesting_only.csv")
+
+
+def _dataset_path(env_key: str, default_name: str) -> str:
+    """
+    Resolve a crop CSV path.
+
+    VM_SOY_CSV / VM_RICE_CSV may be absolute or relative to the repo root.
+    Default files live under DATA/ (uppercase on Grace).
+    """
+    raw = os.environ.get(env_key)
+    if raw:
+        path = Path(raw)
+        return str(path if path.is_absolute() else REPO_DIR / path)
+    return str(REPO_DIR / "DATA" / default_name)
+
+
+SOY_DATASET_FILE = _dataset_path("VM_SOY_CSV", "soybean_with_harvesting_only.csv")
+RICE_DATASET_FILE = _dataset_path("VM_RICE_CSV", "rice_with_harvesting_only.csv")
 RESULTS_DIR = str(REPO_DIR / "Results")
 TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 

@@ -14,6 +14,9 @@
 #                        (default: soybean,per_crop)
 #     VM_SCRIPT       Python script under Codes/ to run   (default: VM_TransferLearning.py;
 #                     slurm/run_convergence.slurm sets VM_Convergence.py)
+#     VM_SOY_CSV      Soybean input CSV (default: DATA/soybean_with_harvesting_only.csv)
+#     VM_RICE_CSV     Rice input CSV    (default: DATA/rice_with_harvesting_only.csv)
+#     VM_BEST_PARAMS_FILE  Optional Optuna JSON to skip the search
 #
 # See slurm/README.md for details.
 
@@ -43,9 +46,23 @@ VM_SCRIPT="${VM_SCRIPT:-VM_TransferLearning.py}"
 REPO_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 SCRIPT_PATH="${REPO_DIR}/Codes/${VM_SCRIPT}"
 REQUIREMENTS="${REPO_DIR}/requirements.txt"
+
+# Resolve dataset paths the same way Codes/VM_TransferLearning.py does.
+_resolve_csv() {
+    local raw="$1"
+    if [[ "${raw}" = /* ]]; then
+        printf '%s\n' "${raw}"
+    else
+        printf '%s\n' "${REPO_DIR}/${raw}"
+    fi
+}
+SOY_CSV_PATH="$(_resolve_csv "${VM_SOY_CSV:-DATA/soybean_with_harvesting_only.csv}")"
+RICE_CSV_PATH="$(_resolve_csv "${VM_RICE_CSV:-DATA/rice_with_harvesting_only.csv}")"
+export VM_SOY_CSV="${SOY_CSV_PATH}"
+export VM_RICE_CSV="${RICE_CSV_PATH}"
 REQUIRED_DATA=(
-    "${REPO_DIR}/DATA/soybean_with_harvesting_only.csv"
-    "${REPO_DIR}/DATA/rice_with_harvesting_only.csv"
+    "${SOY_CSV_PATH}"
+    "${RICE_CSV_PATH}"
 )
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }

@@ -7,3 +7,4 @@ optuna
 seaborn
 scipy
 tensorflow
+requests
