@@ -10,9 +10,11 @@ weights. This script:
   2. Pulls NASA POWER daily weather for unique (lat, lon, year) (cached).
   3. Aggregates planting→harvest with *identical* shared stress formulas
      (same rain / heat / dry-spell / shared-base GDD rules for both crops).
-  4. Adds planting- and harvest-day POWER snapshots so rice `_H` columns
-     have soybean counterparts.
-  5. Writes Data/VM_SOYBEAN_TESTING_STUFF.csv and Data/VM_RICE_TESTING_STUFF.csv.
+  4. Splits the season into GDD-fraction stages (S1–S4) and computes precip /
+     GDD / stress / high-radiation *per stage* (timing, not only season totals).
+  5. Adds harvest-day POWER snapshots so rice `_H` columns have soybean peers.
+  6. Writes Data/VM_*_TESTING_STUFF_v2.csv (stage features). Also refreshes
+     Data/VM_*_TESTING_STUFF.csv for backward compatibility.
 
 Does not modify the original harvesting-only CSVs.
 """
@@ -37,6 +39,8 @@ SOY_IN = DATA_DIR / "soybean_with_harvesting_only.csv"
 RICE_IN = DATA_DIR / "rice_with_harvesting_only.csv"
 SOY_OUT = DATA_DIR / "VM_SOYBEAN_TESTING_STUFF.csv"
 RICE_OUT = DATA_DIR / "VM_RICE_TESTING_STUFF.csv"
+SOY_OUT_V2 = DATA_DIR / "VM_SOYBEAN_TESTING_STUFF_v2.csv"
+RICE_OUT_V2 = DATA_DIR / "VM_RICE_TESTING_STUFF_v2.csv"
 
 SSURGO_URL = "https://sdmdataaccess.nrcs.usda.gov/Tabular/post.rest"
 POWER_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
@@ -47,8 +51,13 @@ POWER_PARAMS = (
 # Empty SoilGrids stubs in the soybean file — drop and replace with SSURGO.
 DROP_SOY_EMPTY_SOIL = ("phh2o_0_15cm", "clay_0_15cm", "soc_0_15cm")
 
-# Keep original seasonal aggregates; new shared columns use a Shared_ prefix
-# except soil_* and day-of-year helpers.
+# NASA POWER ALLSKY_SFC_SW_DWN is MJ/m^2/day. ~20 is near the upper quartile
+# in LA growing seasons in our cache (~22 MJ median summer) — "bright" days.
+HIGH_RAD_MJ = 20.0
+# Phenology bins as fractions of season cumulative Shared GDD (base 10 C).
+STAGE_EDGES = (0.0, 0.25, 0.50, 0.75, 1.0)
+STAGE_NAMES = ("S1", "S2", "S3", "S4")  # early → late by GDD progress
+
 REQUEST_SLEEP_S = 0.15
 MAX_RETRIES = 4
 
@@ -229,15 +238,86 @@ def _longest_run(mask: np.ndarray) -> int:
     return int(best)
 
 
+def _stage_masks(gdd: np.ndarray) -> List[np.ndarray]:
+    """
+    Boolean masks for GDD-fraction stages S1–S4.
+
+    Stages are quartiles of *cumulative* shared GDD within the season so early
+    vs late stress lines up by thermal progress, not calendar date. If total
+    GDD is zero, falls back to equal day-count quarters.
+    """
+    n = len(gdd)
+    if n == 0:
+        return [np.array([], dtype=bool) for _ in STAGE_NAMES]
+    cum = np.cumsum(np.nan_to_num(gdd, nan=0.0))
+    total = float(cum[-1])
+    masks: List[np.ndarray] = []
+    if total <= 1e-6:
+        idx = np.arange(n)
+        for i in range(len(STAGE_NAMES)):
+            lo = int(round(STAGE_EDGES[i] * n))
+            hi = int(round(STAGE_EDGES[i + 1] * n))
+            masks.append((idx >= lo) & (idx < hi) if i < len(STAGE_NAMES) - 1 else (idx >= lo) & (idx <= hi))
+        return masks
+    for i in range(len(STAGE_NAMES)):
+        lo = STAGE_EDGES[i] * total
+        hi = STAGE_EDGES[i + 1] * total
+        if i == 0:
+            masks.append(cum <= hi)
+        elif i == len(STAGE_NAMES) - 1:
+            masks.append(cum > lo)
+        else:
+            masks.append((cum > lo) & (cum <= hi))
+    return masks
+
+
+def _stage_block(
+    prefix: str,
+    mask: np.ndarray,
+    precip: np.ndarray,
+    tmax: np.ndarray,
+    tmin: np.ndarray,
+    gdd: np.ndarray,
+    solar: np.ndarray,
+) -> Dict[str, float]:
+    """Shared stress aggregates for one phenology stage (or empty if no days)."""
+    if not np.any(mask):
+        return {
+            f"{prefix}_Days": 0.0,
+            f"{prefix}_Cum_Precip": 0.0,
+            f"{prefix}_GDD_Base10": 0.0,
+            f"{prefix}_Flooding_Days_15mm": 0.0,
+            f"{prefix}_Heat_Days_Tmax35C": 0.0,
+            f"{prefix}_Dry_Days": 0.0,
+            f"{prefix}_HighRad_Days": 0.0,
+            f"{prefix}_HighRad_Sum": 0.0,
+            f"{prefix}_Mean_Solar": np.nan,
+        }
+    p, tx, tn, g, s = precip[mask], tmax[mask], tmin[mask], gdd[mask], solar[mask]
+    high = s > HIGH_RAD_MJ
+    return {
+        f"{prefix}_Days": float(np.sum(mask)),
+        f"{prefix}_Cum_Precip": float(np.nansum(p)),
+        f"{prefix}_GDD_Base10": float(np.nansum(g)),
+        f"{prefix}_Flooding_Days_15mm": float(np.nansum(p > 15)),
+        f"{prefix}_Heat_Days_Tmax35C": float(np.nansum(tx > 35)),
+        f"{prefix}_Dry_Days": float(np.nansum(p < 1.0)),
+        f"{prefix}_HighRad_Days": float(np.nansum(high)),
+        f"{prefix}_HighRad_Sum": float(np.nansum(np.where(high, s, 0.0))),
+        f"{prefix}_Mean_Solar": float(np.nanmean(s)),
+    }
+
+
 def aggregate_season(daily: pd.DataFrame, plant: pd.Timestamp, harvest: pd.Timestamp) -> Dict[str, float]:
     """
-    Shared seasonal indices from daily POWER rows between plant and harvest.
+    Shared seasonal + stage-wise indices from daily POWER rows (plant→harvest).
 
     Uses the same thresholds for rice and soybean so columns are transferable.
-    Shared GDD base is 10 C (not crop-specific caps).
+    Shared GDD base is 10 C (not crop-specific caps). Stages S1–S4 are
+    quartiles of cumulative shared GDD. High-radiation days use HIGH_RAD_MJ.
     """
     window = daily[(daily["date"] >= plant) & (daily["date"] <= harvest)].copy()
-    empty = {
+    empty: Dict[str, float] = {
         "Shared_Season_Days": np.nan,
         "Shared_Cum_Precip": np.nan,
         "Shared_Flooding_Days_15mm": np.nan,
@@ -262,13 +342,22 @@ def aggregate_season(daily: pd.DataFrame, plant: pd.Timestamp, harvest: pd.Times
         "Shared_Cum_Solar": np.nan,
         "Shared_Mean_Solar": np.nan,
         "Shared_Mean_VPD_proxy": np.nan,
+        "Shared_HighRad_Days": np.nan,
+        "Shared_HighRad_Sum": np.nan,
+        "Shared_HighRad_Frac": np.nan,
         "Temperature_H": np.nan,
         "WindSpeed_H": np.nan,
         "SolarRadiation_H": np.nan,
         "RelativeHumidity_H": np.nan,
         "Precipitation_H": np.nan,
-        "days_from_year_start_Emergence": np.nan,
     }
+    for name in STAGE_NAMES:
+        for suffix in (
+            "Days", "Cum_Precip", "GDD_Base10", "Flooding_Days_15mm",
+            "Heat_Days_Tmax35C", "Dry_Days", "HighRad_Days", "HighRad_Sum", "Mean_Solar",
+        ):
+            empty[f"Shared_{name}_{suffix}"] = np.nan
+
     if window.empty:
         return empty
 
@@ -283,11 +372,12 @@ def aggregate_season(daily: pd.DataFrame, plant: pd.Timestamp, harvest: pd.Times
     wet = precip > 1.0
     dry = precip < 1.0
     gdd = np.maximum(0.0, (tmax + tmin) / 2.0 - 10.0)
+    high_rad = solar > HIGH_RAD_MJ
     # Simple vapor-pressure-deficit proxy (kPa-ish scale, not exact ASCE).
     es = 0.6108 * np.exp(17.27 * tavg / (tavg + 237.3))
     vpd = es * (1.0 - np.clip(rh, 0, 100) / 100.0)
 
-    out = {
+    out: Dict[str, float] = {
         "Shared_Season_Days": float(len(window)),
         "Shared_Cum_Precip": float(np.nansum(precip)),
         "Shared_Flooding_Days_15mm": float(np.nansum(precip > 15)),
@@ -312,7 +402,13 @@ def aggregate_season(daily: pd.DataFrame, plant: pd.Timestamp, harvest: pd.Times
         "Shared_Cum_Solar": float(np.nansum(solar)),
         "Shared_Mean_Solar": float(np.nanmean(solar)),
         "Shared_Mean_VPD_proxy": float(np.nanmean(vpd)),
+        "Shared_HighRad_Days": float(np.nansum(high_rad)),
+        "Shared_HighRad_Sum": float(np.nansum(np.where(high_rad, solar, 0.0))),
+        "Shared_HighRad_Frac": float(np.nansum(high_rad) / max(len(window), 1)),
     }
+
+    for name, mask in zip(STAGE_NAMES, _stage_masks(gdd)):
+        out.update(_stage_block(f"Shared_{name}", mask, precip, tmax, tmin, gdd, solar))
 
     # Harvest-day snapshot (soy lacked rice's Temperature_H etc.)
     harvest_rows = daily[daily["date"] == harvest]
@@ -455,8 +551,11 @@ def main() -> None:
 
     soy_out.to_csv(SOY_OUT, index=False)
     rice_out.to_csv(RICE_OUT, index=False)
-    print(f"Saved {SOY_OUT}")
-    print(f"Saved {RICE_OUT}")
+    soy_out.to_csv(SOY_OUT_V2, index=False)
+    rice_out.to_csv(RICE_OUT_V2, index=False)
+    print(f"Saved {SOY_OUT} and {SOY_OUT_V2}")
+    print(f"Saved {RICE_OUT} and {RICE_OUT_V2}")
+    print(f"High-radiation threshold: {HIGH_RAD_MJ} MJ/m^2/day | stages: {STAGE_NAMES} by GDD fraction")
     feature_report(soy_out, rice_out)
 
 

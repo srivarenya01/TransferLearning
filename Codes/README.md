@@ -93,9 +93,9 @@ Follow-up methods that try to make soybean useful, on the same rice splits. Harv
 
 ## `VM_EnrichCommonFeatures.py`
 
-Builds thicker *shared* feature tables for a transfer sensitivity: SSURGO topsoil at each unique lat/lon, NASA POWER daily weather for each planting–harvest window, and identical stress indices for both crops (flood / heavy rain / dry spells / heat / frost / shared-base GDD at 10 °C / VPD proxy). Also adds harvest-day POWER snapshots so soybean gets rice’s `Temperature_H`-style columns. Writes `Data/VM_SOYBEAN_TESTING_STUFF.csv` and `Data/VM_RICE_TESTING_STUFF.csv` (gitignored; scp to Grace `DATA/`). Cache under `Data/enrichment_cache/`.
+Builds thicker *shared* feature tables for a transfer sensitivity: SSURGO topsoil, NASA POWER daily seasons, identical season stress indices, **GDD-fraction stages S1–S4** (precip / GDD / heat / flood / dry / high-rad per stage), and season **high-radiation** days (solar > 20 MJ/m²/day). Harvest-day `_H` weather is aligned for soybean. Writes `Data/VM_*_TESTING_STUFF.csv` and `*_v2.csv` (gitignored; scp to Grace `DATA/`). Cache under `Data/enrichment_cache/`.
 
-Point the main pipeline at those files with `VM_SOY_CSV` / `VM_RICE_CSV`, or `sbatch slurm/run_enriched_transfer.slurm`.
+Point the pipeline with `VM_SOY_CSV` / `VM_RICE_CSV`, or `sbatch slurm/run_enriched_transfer.slurm` (defaults to v2 + both scalings; **fresh Optuna**).
 
 ## `VM_SmokeTransferEnriched.py`
 
